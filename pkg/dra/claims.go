@@ -71,6 +71,12 @@ func countDevicesPerClass(claimSpec *resourcev1.ResourceClaimSpec) (resources.Re
 		var dcName string
 		var q int64
 		if req.FirstAvailable != nil {
+			// When the envelope feature is enabled, FirstAvailable requests are
+			// charged separately by firstAvailableCharges (at the logical-resource
+			// level, in the caller); skip them here rather than rejecting.
+			if features.Enabled(features.KueueDRAIntegrationPrioritizedList) {
+				continue
+			}
 			allErrs = append(allErrs, field.Invalid(devicesRequestsPath.Index(i), nil, "FirstAvailable device selection is not supported"))
 			return nil, allErrs
 		}
@@ -122,6 +128,107 @@ func countDevicesPerClass(claimSpec *resourcev1.ResourceClaimSpec) (resources.Re
 		out.Set(dc, utilmath.SaturatingAdd(out.GetValue(dc), q))
 	}
 	return out, nil
+}
+
+// firstAvailableCharges computes the per-logical-resource quota charge for the
+// FirstAvailable (prioritized alternative) requests in claimSpec, resolving each
+// subrequest's DeviceClass to its logical quota resource via mapper. It returns:
+//
+//   - envelope: the component-wise maximum over the alternatives of each
+//     FirstAvailable request, summed across requests. Because the scheduler selects
+//     exactly one subrequest per request, this is a per-resource upper bound on any
+//     realized allocation, so admitting with it never exceeds quota.
+//   - chargeSum: the component-wise sum over the alternatives (the charge-each-
+//     alternative rule), returned only for comparison in tests.
+//
+// envelope <= chargeSum component-wise; it is strictly smaller when two or more
+// alternatives of the same request map to the same logical resource (e.g. prefer
+// one GPU class else another, charged as one gpu instead of two). The maximum is
+// taken after DeviceClass-to-logical-resource mapping.
+//
+// Exactly requests are ignored here. A field error is returned for AllocationMode
+// All, an unmapped DeviceClass, and (initial scope) any counter-backed or
+// capacity-backed alternative.
+//
+// Wired into GetResourceRequestsForResourceClaimTemplates behind the
+// KueueDRAIntegrationPrioritizedList feature gate (default off keeps the current
+// rejection). Implements the count-based prioritized-list quota from KEP-2941; see
+// kubernetes-sigs/kueue#13599.
+func firstAvailableCharges(claimSpec *resourcev1.ResourceClaimSpec, mapper *ResourceMapper, basePath *field.Path) (corev1.ResourceList, corev1.ResourceList, field.ErrorList) {
+	envelopeInt := map[corev1.ResourceName]int64{}
+	sumInt := map[corev1.ResourceName]int64{}
+	if claimSpec == nil {
+		return corev1.ResourceList{}, corev1.ResourceList{}, nil
+	}
+
+	var allErrs field.ErrorList
+	reqPath := basePath.Child("devices", "requests")
+
+	for i, req := range claimSpec.Devices.Requests {
+		if req.FirstAvailable == nil {
+			continue
+		}
+		reqEnvelope := map[corev1.ResourceName]int64{}
+		reqSum := map[corev1.ResourceName]int64{}
+		for k, sub := range req.FirstAvailable {
+			subPath := reqPath.Index(i).Child("firstAvailable").Index(k)
+			switch sub.AllocationMode {
+			case resourcev1.DeviceAllocationModeAll:
+				allErrs = append(allErrs, field.Invalid(subPath.Child("allocationMode"), resourcev1.DeviceAllocationModeAll,
+					"AllocationMode 'All' is not supported: an unbounded subrequest has no finite envelope"))
+				return nil, nil, allErrs
+			case resourcev1.DeviceAllocationModeExactCount:
+				dc := corev1.ResourceName(sub.DeviceClassName)
+				if dc == "" {
+					continue
+				}
+				logical, found := mapper.Lookup(dc)
+				if !found {
+					allErrs = append(allErrs, field.NotFound(subPath.Child("deviceClassName"),
+						fmt.Sprintf("DeviceClass %s is not mapped in DRA configuration", dc)))
+					return nil, nil, allErrs
+				}
+				// Initial scope: count-based mappings only. A counter-backed or
+				// capacity-backed alternative cannot be charged correctly here yet
+				// (those accounting paths process only Exactly requests), so reject
+				// rather than undercharge. Counter/capacity alternatives can be added
+				// later by charging each through its own path and taking the
+				// component-wise maximum. See KEP-2941 (DRAPrioritizedLists).
+				if len(mapper.getCounterConfigs(dc)) > 0 || len(mapper.getCapacityConfigs(dc)) > 0 {
+					allErrs = append(allErrs, field.Invalid(subPath.Child("deviceClassName"), dc,
+						"counter-backed or capacity-backed DeviceClass is not supported in a firstAvailable request"))
+					return nil, nil, allErrs
+				}
+				if sub.Count > reqEnvelope[logical] {
+					reqEnvelope[logical] = sub.Count
+				}
+				reqSum[logical] += sub.Count
+			default:
+				allErrs = append(allErrs, field.Invalid(subPath.Child("allocationMode"), sub.AllocationMode,
+					fmt.Sprintf("unsupported allocation mode: %s", sub.AllocationMode)))
+				return nil, nil, allErrs
+			}
+		}
+		// Component-wise max within the request; saturating sum across requests
+		// (independent), matching the count path's MaxInt64-safe arithmetic.
+		for logical, q := range reqEnvelope {
+			envelopeInt[logical] = utilmath.SaturatingAdd(envelopeInt[logical], q)
+		}
+		for logical, q := range reqSum {
+			sumInt[logical] = utilmath.SaturatingAdd(sumInt[logical], q)
+		}
+	}
+
+	return int64MapToResourceList(envelopeInt), int64MapToResourceList(sumInt), allErrs
+}
+
+// int64MapToResourceList converts an integer device-count map into a ResourceList.
+func int64MapToResourceList(m map[corev1.ResourceName]int64) corev1.ResourceList {
+	out := corev1.ResourceList{}
+	for name, v := range m {
+		out[name] = *resource.NewQuantity(v, resource.DecimalSI)
+	}
+	return out
 }
 
 // getClaimSpec resolves the ResourceClaim(Template) referenced by the PodResourceClaim
@@ -225,6 +332,18 @@ func GetResourceRequestsForResourceClaimTemplates(
 					continue
 				}
 				aggregated = utilresource.MergeResourceListKeepSum(aggregated, corev1.ResourceList{logical: resource.MustParse(strconv.FormatInt(qty, 10))})
+			}
+
+			// FirstAvailable (prioritized alternative) requests are charged with the
+			// component-wise-max envelope when the feature is enabled; without it,
+			// countDevicesPerClass above has already rejected them.
+			if features.Enabled(features.KueueDRAIntegrationPrioritizedList) {
+				envelope, _, faErrs := firstAvailableCharges(spec, mapper, celBasePath)
+				if len(faErrs) > 0 {
+					allErrs = append(allErrs, faErrs...)
+					return nil, allErrs
+				}
+				aggregated = utilresource.MergeResourceListKeepSum(aggregated, envelope)
 			}
 		}
 
