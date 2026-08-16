@@ -19,6 +19,8 @@ package dra
 import (
 	"context"
 	"fmt"
+	"maps"
+	"math"
 	"slices"
 	"strconv"
 
@@ -234,6 +236,10 @@ func GetResourceRequestsForResourceClaimTemplates(
 		if len(aggregated) > 0 {
 			perPodSet[ps.Name] = aggregated
 		}
+	}
+
+	if errs := chargeFitsCanonicalUnits(wl.Spec.PodSets, perPodSet); len(errs) > 0 {
+		return nil, append(allErrs, errs...)
 	}
 
 	return perPodSet, nil
@@ -537,4 +543,70 @@ func MergeDRAResources(dst, src map[kueue.PodSetReference]corev1.ResourceList) m
 		}
 	}
 	return dst
+}
+
+// canonicalUnits converts a device count to the unit the queue accounts the
+// logical resource in: milli for CPU, whole ones for everything else. The
+// conversion is where a count that reads as bounded stops being one.
+func canonicalUnits(name corev1.ResourceName, count int64) (int64, bool) {
+	if name != corev1.ResourceCPU {
+		return count, true
+	}
+	if count > (math.MaxInt64-1)/1000 {
+		return 0, false
+	}
+	return count * 1000, true
+}
+
+// chargeFitsCanonicalUnits reports the charges that cannot reach the queue
+// intact. Each PodSet's charge is multiplied by its count and the results are
+// summed across PodSets, in the resource's canonical unit. Both of those steps
+// saturate rather than fail, and math.MaxInt64 is the value the quota code
+// reads as unlimited, so a count that reaches either is refused here while the
+// number that was asked for is still known.
+//
+// The bound covers the charges this function is given. A Pod requesting the
+// same logical resource by name, and the counter and capacity charges merged in
+// after this returns, are added later and are not bounded here.
+func chargeFitsCanonicalUnits(podSets []kueue.PodSet, perPodSet map[kueue.PodSetReference]corev1.ResourceList) field.ErrorList {
+	var errs field.ErrorList
+	totals := map[corev1.ResourceName]int64{}
+	for i := range podSets {
+		ps := &podSets[i]
+		psPath := field.NewPath("spec", "podSets").Index(i)
+		// Sorted so a PodSet with more than one bad charge reports them in the
+		// same order every time, rather than whichever the map hands over first.
+		charged := perPodSet[ps.Name]
+		for _, name := range slices.Sorted(maps.Keys(charged)) {
+			qty := charged[name]
+			// The charge is accumulated with Quantity.Add and can leave int64
+			// behind, where Value wraps and reads back as an ordinary count.
+			count := utilmath.SafeValue(qty)
+			if count < 0 || count == math.MaxInt64 {
+				errs = append(errs, field.Invalid(psPath, qty.String(),
+					fmt.Sprintf("device count charged to logical resource %s is not a bounded quota amount", name)))
+				continue
+			}
+			canonical, ok := canonicalUnits(name, count)
+			if !ok {
+				errs = append(errs, field.Invalid(psPath, count,
+					fmt.Sprintf("device count charged to logical resource %s is not representable in the units it is accounted in", name)))
+				continue
+			}
+			scaled, ok := utilmath.BoundedMul(canonical, int64(ps.Count))
+			if !ok {
+				errs = append(errs, field.Invalid(psPath.Child("count"), ps.Count,
+					fmt.Sprintf("device count charged to logical resource %s is not representable once multiplied by the podSet count", name)))
+				continue
+			}
+			total, ok := utilmath.BoundedAdd(totals[name], scaled)
+			if !ok {
+				errs = append(errs, field.Invalid(field.NewPath("spec", "podSets"), name,
+					fmt.Sprintf("total charged to logical resource %s across podSets is not representable as a bounded quota amount", name)))
+				continue
+			}
+			totals[name] = total
+		}
+	}
+	return errs
 }
