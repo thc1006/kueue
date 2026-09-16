@@ -1846,39 +1846,30 @@ through its source path and taking the component-wise maximum. Confining a reque
 resource is a configuration-dependent restriction rather than a request shape: the same Workload
 becomes supported once the administrator maps those DeviceClasses to one resource.
 
-The last row limits the composition, not the request. Rather than merging these contributions
-through the shared accounting, Alpha refuses the Workload, and what re-evaluates it is the event
-that changes the contribution:
+The last row limits the composition, not the request: rather than merging such a contribution
+through the shared accounting, Alpha refuses the Workload. What re-evaluates each rejection is the
+event that changes its cause, and an implementation that requeues on Workload updates alone waits
+for the wrong event:
 
-| Contribution | Cleared by |
+| Rejection | Cleared by |
 | --- | --- |
-| a container, init-container or Pod-level request, including a limit read as a missing request | a PodSet template update |
-| `spec.overhead` on the Pod template | a PodSet template update |
-| a `LimitRange` default | that `LimitRange` created, updated or deleted, or a template update that stops it applying |
-| RuntimeClass overhead | that RuntimeClass created, updated or deleted, or a `runtimeClassName` change |
-| a resource transformation output | a manager running with the changed configuration, or a change to the input it reads |
+| a request shape: a direct `ResourceClaim` reference, `All`, an unknown allocation mode, a malformed union | a request or template change; `ResourceClaimTemplate.spec` is immutable, so a template repair is a delete and a recreate |
+| the configuration around it: an unmapped DeviceClass, a `counter` or `capacity` source on an alternative's mapping, alternatives over more than one logical resource | a request or template change, or a manager restart with the changed mappings |
+| a container, init-container or Pod-level request on a charged resource, including a limit read as a missing request, or `spec.overhead` on the Pod template | a PodSet template update |
+| a `LimitRange` default on a charged resource | that `LimitRange` created, updated or deleted, or a template update that stops it applying |
+| RuntimeClass overhead on a charged resource | that RuntimeClass created, updated or deleted, or a `runtimeClassName` change |
+| a resource transformation output on a charged resource | a manager running with the changed configuration, or a change to the input it reads |
+| a source-backed `Exactly` request in the same Workload | the claim definition changing, or Kueue starting with a mapping that makes it count-based |
+| a template the request names that does not exist | that template being created, through a watch keyed by namespace and name, so a same-name template in another namespace wakes nothing |
+| a transient read or API error | not a verdict; retried |
 
-Every event in the second column is already delivered by a watch the workload controller has. An
-`Exactly` charge on the same resource is not a contribution of this kind, since it is charged and
-checked against the same total, and neither is a DRA-backed extended resource, which is replaced
-by its DRA charge before the merge reads it. Lifting the limit takes an amendment here or the Beta
-criteria naming the combinations that become supported; prerequisite work merging does not lift it
-on its own.
-
-What clears the other rejections depends on their cause, and an implementation that requeues on
-Workload updates alone waits for the wrong event:
-
-- a request shape (a direct reference, `All`, an unknown mode, a malformed union): a
-  request or template change, where the template half matters because `ResourceClaimTemplate.spec`
-  is immutable and a repair is a delete and a recreate;
-- the configuration around it (an unmapped class, a source-backed mapping, alternatives over more
-  than one resource): a request or template change, or a manager restart with the changed
-  mappings;
-- a source-backed `Exactly` request in the same Workload: the claim definition changing, or Kueue
-  starting with a mapping that makes it count-based;
-- a template the request names that does not exist: the template being created, which is a watch
-  rather than a retry;
-- a transient read or API error: not a verdict at all, and retried.
+Every event in the second column is already delivered by a watch the workload controller has,
+except the template one, which needs an index from a Workload to the templates it references and a
+watch on their lifecycle. An `Exactly` charge on a charged resource is not a contribution of the
+composition kind, since it is charged and checked against the same total, and neither is a
+DRA-backed extended resource, which is replaced by its DRA charge before the merge reads it.
+Lifting the composition limit takes an amendment here or the Beta criteria naming the combinations
+that become supported; prerequisite work merging does not lift it on its own.
 
 A missing DeviceClass is not a rejection on this path. The envelope reads `deviceClassName`, the
 mapping and the declared count, never the DeviceClass object, so the class's existence and its
@@ -1892,10 +1883,10 @@ be represented exactly at request aggregation, at the merge of an envelope with 
 charges on the same resource, at the PodSet-count multiplication, at the sum across PodSets, and at
 the `resource.Quantity` to `int64` conversion and persistence. Exactly means at milli scale for
 `cpu` and at scale zero otherwise, the unit convention of `resources.ResourceValue`, and it covers
-rounding as well as range. Exactness is checked on merged totals rather than on each operand, so
-two contributions of `0.5` that merge to `1` convert exactly. Representability is decided against
-`spec.podSets[].count`, the largest count the Workload can ask for, so validity does not move with
-partial admission or `ReclaimablePods`; the cost is utilization, not safety.
+rounding as well as range, and it is checked on merged totals rather than on each operand.
+Representability is decided against `spec.podSets[].count`, the largest count the Workload can ask
+for, so validity does not move with partial admission or `ReclaimablePods`; the cost is
+utilization, not safety.
 
 Each operand is checked non-negative where the merge happens. A negative request on a charged
 resource would subtract from the envelope, and `FloorToZero` afterwards would hide the cancellation
@@ -1931,14 +1922,11 @@ accounting inputs.
 
 After Kueue observes an accounting-relevant input change, admission or preemption must not use the
 superseded result. Failed recomputation must not leave the previous charge actionable.
-Deterministic rejections must be re-evaluated when their causes change, and transient read failures
-must remain retryable. Observed means observed by Kueue: a change the API server has accepted and
+Deterministic rejections must be re-evaluated when their causes change, as the recovery table in
+[Alpha support matrix](#alpha-support-matrix) lists, and transient read failures must remain
+retryable. Observed means observed by Kueue: a change the API server has accepted and
 Kueue has not yet seen, and the interval between the charge and the generated `ResourceClaim`, stay
 open and are stated in [Limitations and tradeoffs](#limitations-and-tradeoffs).
-
-Recovery for a template that appears, is deleted, or is deleted and recreated under the same name
-needs an index from a Workload to the templates it references, keyed by namespace and name, and a
-watch covering that lifecycle; a template of the same name in another namespace wakes nothing.
 
 The quota path, the MultiKueue admission check and any admission-time feasibility path consume one
 static-support classifier, in two stages. The first reads the API shape alone, with no gate, no
@@ -1951,11 +1939,9 @@ Selectors in every alternative are compiled with the DRA CEL compiler and syntax
 `Exactly` device-cardinality check is not reused, since it would require every alternative to be
 satisfiable while only one has to be. Skipping it does not affect quota safety, only whether an
 unschedulable Workload can hold the envelope reservation, which `WaitForPodsReady`, when enabled,
-eventually releases. Kueue builds its compiler cache with an empty `dracel.Features`, so a selector
-the apiserver accepted can fail to compile in Kueue
-([#14372](https://github.com/kubernetes-sigs/kueue/issues/14372)); the contract is that Kueue
-compiles a stored selector against the superset the Kubernetes API version it is built against
-exposes, and that issue stays open.
+eventually releases. A selector stored in the supported API version must compile in a DRA CEL
+environment compatible with the apiserver's, which is a shared DRA prerequisite
+([#14372](https://github.com/kubernetes-sigs/kueue/issues/14372)).
 
 A count-based mapping registers no driver with the ResourceSlice controller, so a Workload waiting
 on quota is re-evaluated on the next ClusterQueue event, and once quota is reserved kube-scheduler
@@ -2255,13 +2241,14 @@ admitted one.
 
 - count-based `firstAvailable` quota via the component-wise-max envelope, computed after
   DeviceClass-to-logical-resource mapping
-- the Alpha support matrix enforced, with the whole request refused when any alternative is
+- the Alpha support matrix enforced, and the whole request refused when any of its alternatives
+  is unsupported
 - a shared two-stage classifier consumed by the quota path and the MultiKueue check, with
   table-driven tests freezing each union form
 - preprocessing carrying the logical-resource names the envelopes reached, read as their union
   across the Workload, through queue and requeue together with the charge
-- a charge no boundary can represent exactly making the Workload inadmissible rather than
-  saturated, and a negative operand refused at the merge
+- a charge that any boundary cannot represent exactly making the Workload inadmissible rather
+  than saturated, and a negative operand refused at the merge
 - each rejection class re-evaluated by the event that clears it, and read failures retried rather
   than recorded
 - `excludeResourcePrefixes` and `IgnoreUndeclared` applied to an envelope-touched resource on the
