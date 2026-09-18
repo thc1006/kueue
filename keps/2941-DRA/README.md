@@ -1899,11 +1899,11 @@ except the template one, which needs an index from a Workload to the templates i
 watch on their lifecycle.
 
 A rejection is recorded the way the `Exactly` path records one today: `QuotaReserved=False` with
-reason `Misconfigured` and `Requeued=False` with reason `Inadmissible`, so the reason does not
-distinguish the rows. The message does: it carries every refused field's path and detail, from
-the PodSet and `resourceClaims` index down to the alternative, and each row above maps to one
-detail string. A per-row reason would be a change to the parent path's condition schema and is
-not made here.
+reason `Misconfigured`, or `Inadmissible` where `UnadmittedWorkloadsObservability` is disabled, and
+`Requeued=False` with reason `Inadmissible`, so the reason does not distinguish the rows. The
+message does: it carries every refused field's path and detail, from the PodSet and
+`resourceClaims` index down to the alternative, and each row above maps to one detail string. A
+per-row reason would be a change to the parent path's condition schema and is not made here.
 
 The static shapes are refused where the `Exactly` path refuses them today, at admission, rather
 than by the Workload webhook. Two of them live in the template: `All` is valid upstream, and an
