@@ -1952,7 +1952,7 @@ How existing mechanisms interact with an envelope-touched resource:
 | Mechanism | Effect |
 |---|---|
 | `excludeResourcePrefixes` | Applies to the Pod's own requests, before transformations. A logical resource an explicit `deviceClassMappings` entry synthesizes stays chargeable, as on the `Exactly` path. |
-| `ResourceTransformations` | Run over the Pod's requests before the merge, so a logical resource named as an input or multiplier matches nothing, while outputs aimed at one reach it. |
+| `transformations` | Run over the Pod's requests before the merge, so a logical resource named as an input or multiplier matches nothing, while outputs aimed at one reach it. |
 | `quotaCheckStrategy: IgnoreUndeclared` ([KEP-7513](../7513-quota-check-strategy/README.md)) | Filters the resource on the same terms as an `Exactly` charge or an ordinary request on that name, per request rather than per alternative. An administrator who wants DRA quota enforced declares the mapped resource or keeps `BlockUndeclared`. |
 | A non-DRA contribution on a charged resource: a container, init-container or Pod-level request, a `LimitRange` default, RuntimeClass overhead or a transformation output | The Workload is refused rather than merged, for any of those names anywhere in the Workload. An `Exactly` charge on the name is not such a contribution, and neither is a DRA-backed extended resource. |
 
