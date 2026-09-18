@@ -1069,7 +1069,9 @@ counting devices, Kueue tracks counter consumption (e.g., GPU memory) from the
 Counter-based resources fit into Kueue's existing (Flavor, Resource) quota model.
 Borrowing, lending, cohorts, preemption, and fair sharing work with counter resources.
 The `deviceSelector` ensures accurate charging by narrowing the accounting
-domain. See [Processing Flow](#processing-flow-1) for details.
+domain. See [Processing Flow](#processing-flow-1) for details. A `firstAvailable` alternative
+whose DeviceClass mapping configures a counter source is rejected, since the counter path reads
+`Exactly` requests only.
 
 #### ResourceSlice Structure
 
@@ -1977,9 +1979,8 @@ are listed with the Alpha criteria.
 
 - `KueueDRAIntegrationPrioritizedList` requires `KueueDRAIntegration`; a configuration enabling it
   without the parent is refused by configuration validation. It also requires that the cluster has
-  not disabled the upstream `DRAPrioritizedList` gate, on by default since Kubernetes 1.34, GA in
-  1.36 and locked to its default in 1.37. If the API does not offer `firstAvailable`, no envelope is
-  charged.
+  not disabled the upstream `DRAPrioritizedList` gate, on by default since Kubernetes 1.34 and GA
+  in 1.36. If the API does not offer `firstAvailable`, no envelope is charged.
 - Disabling the gate returns a new `firstAvailable` Workload to the current rejection. A Workload
   that has reserved quota keeps the accounting recorded in its status, since an admitted Workload
   is rebuilt from `status.admission` rather than recomputed, so a restart does not lose the
