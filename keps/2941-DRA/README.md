@@ -2173,8 +2173,8 @@ using mock ResourceClaimTemplates and DeviceClasses to simulate DRA workloads. K
   refused with `adminAccess` exempt, and each composition contribution refused and then cleared by
   the event its row names
 - Prioritized list exactness: a sum of envelopes past the `int64` range is kept exactly in
-  `resources.Amount` rather than saturated, and reaches the request path through the shared
-  Amount-to-Quantity boundary
+  `resources.Amount` up to the shared Amount-to-Quantity boundary, and from there is capped and
+  saturated by the request path like any other resource
 - Prioritized list lifecycle: a backoff requeue and an inflight requeue admit on the charge the
   current revision produces; a stale entry whose inputs changed (the request, a template deleted
   and recreated under the same name, the mapping, the gate) issues no admission, preemption or
@@ -2256,7 +2256,8 @@ admitted one.
   table-driven tests freezing each union form
 - preprocessing carrying the logical-resource names the envelopes reached, read as their union
   across the Workload, through queue and requeue together with the charge
-- envelopes summed in `resources.Amount`, exact at any magnitude, and a negative operand refused
+- envelopes summed in `resources.Amount`, exact up to the shared Amount-to-Quantity boundary and
+  saturated by the request path after it like any other resource, and a negative operand refused
   at the merge
 - each rejection class re-evaluated by the event that clears it, and read failures retried rather
   than recorded
