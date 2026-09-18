@@ -2273,23 +2273,18 @@ once, that the admitted envelope is 2 per Pod and 4 in total, and that the reali
 
 ##### KueueDRAIntegrationPrioritizedList (v0.20)
 
-- count-based `firstAvailable` quota via the component-wise-max envelope, computed after
-  DeviceClass-to-logical-resource mapping
-- the Alpha support matrix enforced, and the whole request refused when any of its alternatives
-  is unsupported
-- a shared two-stage classifier consumed by the quota path and the MultiKueue check, with
-  table-driven tests freezing each union form
-- preprocessing carrying the logical-resource names the envelopes reached, read as their union
-  across the Workload, through queue and requeue together with the charge
-- envelopes summed in `resources.Amount`, emitted as a whole-unit Quantity like the `Exactly`
+- Envelope accounting for count-based `firstAvailable` (KEP-4816, GA in k8s 1.36): each
+  alternative resolved through `deviceClassMappings`, charged the per-resource maximum, merged
+  with the existing `Exactly` charge
+- The Alpha support matrix enforced by one classifier shared with the MultiKueue admission check,
+  refusing the whole request when any alternative is unsupported
+- The envelope-touched resource names carried with the charge through queue and requeue, so a
+  non-DRA contribution on those names is refused
+- Envelopes summed in `resources.Amount`, emitted as a whole-unit Quantity like the `Exactly`
   count and saturated by the request path like any other resource, and a negative operand refused
   at the merge
-- each rejection class re-evaluated by the event that clears it, and read failures retried rather
-  than recorded
-- `excludeResourcePrefixes` and `IgnoreUndeclared` applied to an envelope-touched resource on the
-  same terms as to an `Exactly` charge
-- request selectors compiled with the DRA CEL environment of the supported Kubernetes API
-- integration and e2e tests, including the forced-fallback e2e
+- Each rejection re-evaluated by the event that clears it, and read failures retried
+- Unit, integration and e2e tests, including the forced-fallback e2e
 
 Parent prerequisites, provided by `KueueDRAIntegration` and not designed here:
 
