@@ -1786,13 +1786,9 @@ are `KueueDRAIntegration` properties, listed as parent prerequisites with the
 
 #### Accounting rule
 
-For each top-level `firstAvailable` request `q`, Kueue resolves every alternative's DeviceClass to
-its logical quota resource through `deviceClassMappings`, forms a charge vector per alternative
-`a`, and charges the component-wise maximum:
-
-```text
-envelope(q)[r] = max over a in A_q of charge(q, a)[r]
-```
+For each top-level `firstAvailable` request, Kueue resolves every alternative's DeviceClass to its
+logical quota resource through `deviceClassMappings`, then charges, per resource, the largest
+amount any single alternative would need; that charge is the request's envelope.
 
 The per-Pod DRA charge is the existing `Exactly` charges plus the sum of the envelopes of the
 `firstAvailable` requests. PodSet scaling is unchanged: the per-Pod charge is multiplied by the
@@ -1824,8 +1820,8 @@ charge cannot exceed the admitted one.
 
 This holds when:
 
-- every alternative resolves to a complete, non-negative charge vector, which is why unmapped,
-  unsupported and unknown forms are refused rather than charged;
+- every alternative resolves to a complete, non-negative per-resource charge, which is why
+  unmapped, unsupported and unknown forms are refused rather than charged;
 - every other contribution to a charged resource arrives at the merge exactly once, non-negative,
   and as the value its own source defines.
 
