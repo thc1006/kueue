@@ -1948,7 +1948,12 @@ unions, refuses the malformed ones, and fails closed on an unset kind. The secon
 kind with the gate and the mapping to reach a disposition. An infeasible result is never surfaced
 as unsupported, and a failed read is neither.
 
-Selectors in every alternative are compiled with the DRA CEL compiler and syntax-checked; the
+Selectors in every alternative are compiled with the DRA CEL compiler and syntax-checked, through
+the DRA path's shared compile cache, which is keyed on the expression text and holds 256 entries,
+so a reconcile compiles only the expressions it has not seen. The worst case for one request is
+`FirstAvailableDeviceRequestMaxSize` times `DeviceSelectorsMaxSize`, 8 × 32 = 256 distinct
+expressions against 32 for an `Exactly` request, which is the size of that cache; a request of
+that shape evicts every other entry, and the cost is stated here rather than measured. The
 `Exactly` device-cardinality check is not reused, since it would require every alternative to be
 satisfiable while only one has to be. Skipping it does not affect quota safety, only whether an
 unschedulable Workload can hold the envelope reservation, which `WaitForPodsReady`, when enabled,
@@ -2005,8 +2010,11 @@ Namespace `ResourceQuota` and `ClusterQueue` quota may both apply to one Workloa
   request to one logical resource, so this is one dimension, but a request whose first choice is
   four devices and whose fallback is one still reserves four. This is conservative rather than
   unsafe, and it affects admission, cohort borrowing, preemption, Admission Fair Sharing usage,
-  ordering and utilization. Charging less than the envelope, or shrinking the reservation after
-  allocation, is discussed under
+  ordering and utilization. Preemption sizes its victim set from this charge, since
+  `Assignment.TotalRequestsFor` feeds `workloadUsage.Quota.Assigned`, so Kueue evicts enough work
+  to free the envelope rather than the realized allocation; that is the strongest argument for
+  adjusting the reservation after allocation, which Beta re-evaluates. Charging less than the
+  envelope, or shrinking the reservation after allocation, is discussed under
   [Alternatives](#charging-a-prioritized-list-other-than-by-its-envelope).
 - The quota bound is defined for a fixed `ResourceClaimTemplate` identity and quota-affecting
   `ResourceClaimSpec`, from the reservation until the generated `ResourceClaim` is created. Kueue
@@ -2328,6 +2336,8 @@ Parent prerequisites, provided by `KueueDRAIntegration` and not designed here:
   closed rather than contributing zero
 - re-evaluate refusing the static request shapes at the Workload webhook, together with the
   `Exactly` path
+- re-evaluate adjusting a reservation to the realized alternative once the generated
+  `ResourceClaim` is allocated, since preemption sizes its victim set from the envelope
 
 #### GA
 
