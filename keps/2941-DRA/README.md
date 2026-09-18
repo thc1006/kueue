@@ -1773,7 +1773,10 @@ default off). It adds quota accounting for prioritized-list requests, the `first
 a `DeviceRequest` (the Kubernetes `DRAPrioritizedList` feature, GA in 1.36). A `firstAvailable`
 request lists up to eight ordered alternatives (`FirstAvailableDeviceRequestMaxSize`);
 kube-scheduler selects exactly one at allocation time, which Kueue does not know when it reserves
-quota. With the gate off, such requests stay rejected as they are today.
+quota. With the gate off, such requests stay rejected as they are today. It adds no
+configuration field and no API field; the feature gate is the only new surface, and every input
+it reads, `deviceClassMappings`, `excludeResourcePrefixes` and the claim template itself, already
+exists.
 
 The gate decides one thing: whether a `firstAvailable` request may enter accounting or is refused
 as unsupported. Toggling it changes nothing observable for a Workload with no `firstAvailable`
@@ -1832,12 +1835,12 @@ bumping that dependency means reviewing any new field that affects the charge.
 | alternatives under count-based mappings (no `sources`) that all resolve to one logical resource | supported |
 | subrequest `capacity` under a source-less mapping | supported, charged by device count |
 | subrequest `selectors` and `tolerations` | selectors compiled; neither is part of the charge; no device cardinality check |
-| direct `ResourceClaim` reference | rejected |
-| an alternative with allocation mode `All` | rejected |
-| unknown allocation mode, or a malformed union | rejected |
-| an alternative with an unmapped DeviceClass | rejected |
-| an alternative whose mapping configures a `counter` or `capacity` source | whole request rejected |
-| alternatives resolving to more than one logical resource | rejected while the claim is read |
+| direct `ResourceClaim` reference | request rejected |
+| an alternative with allocation mode `All` | request rejected |
+| unknown allocation mode, or a malformed union | request rejected |
+| an alternative with an unmapped DeviceClass | request rejected |
+| an alternative whose mapping configures a `counter` or `capacity` source | request rejected |
+| alternatives resolving to more than one logical resource | request rejected |
 | a source-backed `Exactly` request in the same Workload, unless `adminAccess` | Workload rejected |
 | a non-DRA contribution on a resource an envelope is charged on | Workload rejected |
 
@@ -1852,6 +1855,13 @@ avoids is what the envelope does across resources: with alternatives on differen
 resources it charges every dimension while kube-scheduler consumes one, so a fallback makes
 admission strictly harder than no fallback. That is the hazard, and Beta has to solve it before
 the limit is lifted.
+
+The shape Alpha covers is a fallback within one budget. The plainest case needs no mapping change
+at all: one DeviceClass with two alternatives that differ only in their selectors, an 80 GiB card
+or else any card of that class. The other is two generations of one accelerator, an H100 class or
+else an A100 class, mapped to one logical resource because the quota is counted per accelerator.
+A fallback across budgets, a GPU or else a TPU, is what the restriction refuses, and the hazard
+above is what it protects.
 
 The last row limits the composition, not the request: rather than merging such a contribution
 through the shared accounting, Alpha refuses the Workload. An `Exactly` charge on a charged
@@ -1888,6 +1898,13 @@ Every event in the second column is already delivered by a watch the workload co
 except the template one, which needs an index from a Workload to the templates it references and a
 watch on their lifecycle.
 
+A rejection is recorded the way the `Exactly` path records one today: `QuotaReserved=False` with
+reason `Misconfigured` and `Requeued=False` with reason `Inadmissible`, so the reason does not
+distinguish the rows. The message does: it carries every refused field's path and detail, from
+the PodSet and `resourceClaims` index down to the alternative, and each row above maps to one
+detail string. A per-row reason would be a change to the parent path's condition schema and is
+not made here.
+
 The static shapes are refused where the `Exactly` path refuses them today, at admission, rather
 than by the Workload webhook. Two of them live in the template: `All` is valid upstream, and an
 unknown allocation mode is one a newer apiserver may accept while the API asks clients to refuse
@@ -1904,11 +1921,11 @@ an inadmissible Workload carries the reason in a condition.
 #### Exactness and composition
 
 The envelopes of a claim are summed in `resources.Amount`, which holds an integer exactly at any
-magnitude, and the sum reaches the shared request path through the same Amount-to-Quantity
-boundary every other resource crosses. From there a DRA charge is treated like any other request:
-the per-Workload request arithmetic saturates at `math.MaxInt64`, and a charge of that magnitude is
-admissible only against a quota of the same magnitude, since the scheduler compares amounts
-exactly. That saturation is shared behaviour
+magnitude, and the sum becomes a whole-unit `resource.Quantity` the way the `Exactly` count does,
+so a logical resource named `cpu` is charged one core per device on both paths. From there a DRA
+charge is treated like any other request: the per-Workload request arithmetic saturates at
+`math.MaxInt64`, and a charge of that magnitude is admissible only against a quota of the same
+magnitude, since the scheduler compares amounts exactly. That saturation is shared behaviour
 ([#14371](https://github.com/kubernetes-sigs/kueue/issues/14371)); this gate neither depends on it
 nor changes it.
 
@@ -2173,8 +2190,8 @@ using mock ResourceClaimTemplates and DeviceClasses to simulate DRA workloads. K
   refused with `adminAccess` exempt, and each composition contribution refused and then cleared by
   the event its row names
 - Prioritized list exactness: a sum of envelopes past the `int64` range is kept exactly in
-  `resources.Amount` up to the shared Amount-to-Quantity boundary, and from there is capped and
-  saturated by the request path like any other resource
+  `resources.Amount`, becomes a whole-unit Quantity like the `Exactly` count, including on a
+  logical resource named `cpu`, and is saturated by the request path like any other resource
 - Prioritized list lifecycle: a backoff requeue and an inflight requeue admit on the charge the
   current revision produces; a stale entry whose inputs changed (the request, a template deleted
   and recreated under the same name, the mapping, the gate) issues no admission, preemption or
@@ -2203,8 +2220,8 @@ preferred-class device and two fallback-class devices on a node, and two Pods sh
 that asks for one preferred device or two fallback ones. The first Pod takes the preferred device
 and the second has to take both fallback ones. The allocation result records the selected
 alternative as `<request>/<subrequest>`, so the test asserts that each alternative was selected
-once, that the admitted envelope is `2 x 2`, and that the realized total of `1 + 2` is at most the
-admitted one.
+once, that the admitted envelope is 2 per Pod and 4 in total, and that the realized total of
+1 + 2 = 3 is at most the admitted 4.
 
 ### Graduation Criteria
 
@@ -2256,8 +2273,8 @@ admitted one.
   table-driven tests freezing each union form
 - preprocessing carrying the logical-resource names the envelopes reached, read as their union
   across the Workload, through queue and requeue together with the charge
-- envelopes summed in `resources.Amount`, exact up to the shared Amount-to-Quantity boundary and
-  saturated by the request path after it like any other resource, and a negative operand refused
+- envelopes summed in `resources.Amount`, emitted as a whole-unit Quantity like the `Exactly`
+  count and saturated by the request path like any other resource, and a negative operand refused
   at the merge
 - each rejection class re-evaluated by the event that clears it, and read failures retried rather
   than recorded
