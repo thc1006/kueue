@@ -1799,32 +1799,38 @@ The per-Pod DRA charge is the existing `Exactly` charges plus the sum of the env
 effective PodSet count, and with `ElasticJobsViaWorkloadSlices` each slice carries its own count
 and computes its envelope independently.
 
-```text
-request A: one device of class X, or two devices of class Y
-mapping:   X and Y both map to example.com/gpu
-charge A:  2
+| Alternative | Request | DeviceClass | Maps to | Charge |
+|---|---|---|---|---|
+| 1st choice | 1 device | `a100.example.com` | `example.com/gpu` | 1 |
+| fallback | 2 devices | `t4.example.com` | `example.com/gpu` | 2 |
+| **envelope** | | | | **2** |
 
-A second, independent request for one device of the same resource brings
-the per-Pod charge to 3, before PodSet scaling.
-```
+A second, independent request for one device of the same resource brings the per-Pod charge to 3,
+before PodSet scaling. If kube-scheduler picks the A100, the Workload consumes 1 and holds 2.
 
-`DeviceSubRequest` has no `adminAccess` field, so the zero-charge rule for admin access stays
-confined to `Exactly` requests. The classifier reads effective values: an omitted `allocationMode`
-is `ExactCount` and an omitted `count` under it is one, as the API documents. A subrequest
-`capacity` requirement does not change how many devices the alternative asks for, and an omitted
-`capacity` is not the absence of capacity consumption, so under a source-less mapping it is
-charged by device count, as the `Exactly` path already charges it.
+Effective values, and what does not affect the charge:
+
+- An omitted `allocationMode` is `ExactCount`, and an omitted `count` under it is one.
+- `DeviceSubRequest` has no `adminAccess`, so the zero-charge rule stays confined to `Exactly`.
+- A subrequest `capacity` requirement does not change how many devices an alternative asks for.
+- An omitted `capacity` is not the absence of capacity consumption, so under a source-less mapping
+  it is charged by device count, as the `Exactly` path already charges it.
 
 #### Why this is an upper bound
 
-The bound holds because kube-scheduler selects exactly one alternative per request: for every
-logical resource the selected alternative's charge is at most the envelope, and summed over
-requests the realized charge cannot exceed the admitted one. It holds when every alternative
-resolves to a complete, non-negative charge vector, which is why unmapped, unsupported and unknown
-forms are refused rather than charged, and when every other contribution to a charged resource
-arrives at the merge exactly once, non-negative, and as the value its own source defines. The
-classifier sees only the request forms in the Kubernetes API version Kueue is compiled against, so
-bumping that dependency means reviewing any new field that affects the charge.
+kube-scheduler selects exactly one alternative per request, so for every logical resource the
+selected alternative's charge is at most the envelope, and summed over requests the realized
+charge cannot exceed the admitted one.
+
+This holds when:
+
+- every alternative resolves to a complete, non-negative charge vector, which is why unmapped,
+  unsupported and unknown forms are refused rather than charged;
+- every other contribution to a charged resource arrives at the merge exactly once, non-negative,
+  and as the value its own source defines.
+
+The classifier sees only the request forms in the Kubernetes API version Kueue is compiled
+against, so bumping that dependency means reviewing any new field that affects the charge.
 
 #### Alpha support matrix
 
@@ -1844,17 +1850,22 @@ bumping that dependency means reviewing any new field that affects the charge.
 | a source-backed `Exactly` request in the same Workload, unless `adminAccess` | Workload rejected |
 | a non-DRA contribution on a resource an envelope is charged on | Workload rejected |
 
-Where one alternative is refused the whole request is refused, since the envelope is a maximum
-over every alternative and dropping one stops it bounding the allocation kube-scheduler may still
-choose. Source-backed alternatives are excluded because the counter and consumable-capacity paths
-process only `Exactly` requests today; they can be added later by charging each alternative
-through its source path and taking the component-wise maximum. Confining a request to one logical
-resource is a restriction on the mapping rather than on the request shape, and the same Workload
-becomes supported once the administrator maps those DeviceClasses to one resource. The hazard it
-avoids is what the envelope does across resources: with alternatives on different logical
-resources it charges every dimension while kube-scheduler consumes one, so a fallback makes
-admission strictly harder than no fallback. That is the hazard, and Beta has to solve it before
-the limit is lifted.
+Why each refusal exists:
+
+- **Any unsupported alternative refuses the whole request.** The envelope is a maximum, so dropping
+  one alternative stops it bounding what kube-scheduler may still choose.
+- **Source-backed alternatives**: the counter and capacity paths process only `Exactly` today. They
+  can be added later by charging each alternative through its source path and taking the
+  component-wise maximum.
+- **More than one logical resource** would charge every dimension while kube-scheduler consumes
+  one, so a fallback would make admission strictly harder than no fallback. Beta must solve this
+  before the limit is lifted. The limit is on the mapping rather than on the request shape: the
+  same Workload becomes supported once the administrator maps those DeviceClasses to one resource.
+- **A non-DRA contribution on a charged resource** is refused rather than merged. An `Exactly`
+  charge is not one, since it is charged against the same total, and neither is a DRA-backed
+  extended resource, which is replaced before the merge reads it. Lifting this limit takes an
+  amendment here or Beta criteria naming the combinations that become supported; prerequisite
+  work merging does not lift it on its own.
 
 The shape Alpha covers is a fallback within one budget. The plainest case needs no mapping change
 at all: one DeviceClass with two alternatives that differ only in their selectors, an 80 GiB card
@@ -1862,14 +1873,6 @@ or else any card of that class. The other is two generations of one accelerator,
 else an A100 class, mapped to one logical resource because the quota is counted per accelerator.
 A fallback across budgets, a GPU or else a TPU, is what the restriction refuses, and the hazard
 above is what it protects.
-
-The last row limits the composition, not the request: rather than merging such a contribution
-through the shared accounting, Alpha refuses the Workload. An `Exactly` charge on a charged
-resource is not a contribution of the composition kind, since it is charged and checked against
-the same total, and neither is a DRA-backed extended resource, which is replaced by its DRA charge
-before the merge reads it. Lifting the composition limit takes an amendment here or the Beta
-criteria naming the combinations that become supported; prerequisite work merging does not lift
-it on its own.
 
 A missing DeviceClass is not a rejection on this path. The envelope reads `deviceClassName`, the
 mapping and the declared count, never the DeviceClass object, so the class's existence and its
@@ -1944,19 +1947,17 @@ clear of the shared accounting defects rather than making it their fix. Summing 
 before flavors are assigned is stricter than the per-flavor accounting that follows, which is
 intended.
 
-`excludeResourcePrefixes` applies to the Pod's own requests, before transformations run; a logical
-resource that an explicit `deviceClassMappings` entry synthesizes stays chargeable, as on the
-`Exactly` path, so one administrator configuration means one thing whichever shape the claim
-takes. Transformations run over the Pod's requests before the merge, so a logical resource named
-as a transformation input or multiplier matches nothing, while outputs aimed at a logical resource
-reach it. Whether an overlap between a prefix and a mapping should be refused at configuration
-load is a question for every mapping and is left to its own issue.
+How existing mechanisms interact with an envelope-touched resource:
 
-`quotaCheckStrategy: IgnoreUndeclared` ([KEP-7513](../7513-quota-check-strategy/README.md))
-leaves a resource the ClusterQueue does not declare out of the quota check. An envelope-touched
-resource is filtered on the same terms as an `Exactly` charge or an ordinary request on that name,
-the request as a whole rather than one of its alternatives. An administrator who wants DRA quota
-enforced declares the mapped resource or keeps `BlockUndeclared`.
+| Mechanism | Effect |
+|---|---|
+| `excludeResourcePrefixes` | Applies to the Pod's own requests, before transformations. A logical resource an explicit `deviceClassMappings` entry synthesizes stays chargeable, as on the `Exactly` path. |
+| `ResourceTransformations` | Run over the Pod's requests before the merge, so a logical resource named as an input or multiplier matches nothing, while outputs aimed at one reach it. |
+| `quotaCheckStrategy: IgnoreUndeclared` ([KEP-7513](../7513-quota-check-strategy/README.md)) | Filters the resource on the same terms as an `Exactly` charge or an ordinary request on that name, per request rather than per alternative. An administrator who wants DRA quota enforced declares the mapped resource or keeps `BlockUndeclared`. |
+| A non-DRA contribution on a charged resource: a container, init-container or Pod-level request, a `LimitRange` default, RuntimeClass overhead or a transformation output | The Workload is refused rather than merged, for any of those names anywhere in the Workload. An `Exactly` charge on the name is not such a contribution, and neither is a DRA-backed extended resource. |
+
+Whether an overlap between a prefix and a mapping should be refused at configuration load is a
+question for every mapping and is left to its own issue.
 
 #### Integration requirements
 
@@ -2012,13 +2013,16 @@ are listed with the Alpha criteria.
 #### Relationship with Kubernetes ResourceQuota
 
 This is a Kueue-specific policy and does not change Kubernetes `ResourceQuota` (KEP-4816). For the
-`ExactCount` alternatives this Alpha covers, core `ResourceQuota` takes, within each top-level
-`firstAvailable`, the largest device count among the alternatives naming a given DeviceClass, and
-adds those per-class maxima across requests; it does not sum the alternatives of one request.
-Kueue applies the same per-request maximum after mapping DeviceClasses into logical resources, so
-a mapping that sends several DeviceClasses to one logical resource collapses charges that core
-`ResourceQuota` keeps apart. Core `ResourceQuota` gives allocation mode `All` a finite worst-case
-charge from `AllocationResultsMaxSize`, while Kueue refuses a non-admin `All` in this Alpha.
+`ExactCount` alternatives this Alpha covers:
+
+| | core `ResourceQuota` | Kueue |
+|---|---|---|
+| Within one `firstAvailable` | largest device count among alternatives naming a given DeviceClass | same maximum, applied after mapping DeviceClasses to logical resources |
+| Across requests | adds the per-class maxima | adds the per-resource maxima |
+| Several DeviceClasses mapped to one logical resource | kept apart | collapsed into one charge |
+| Allocation mode `All` | finite worst case from `AllocationResultsMaxSize` | refused for non-admin requests in this Alpha |
+| An allocation mode the build does not know | not counted | request refused |
+
 Namespace `ResourceQuota` and `ClusterQueue` quota may both apply to one Workload, and
 `firstAvailable` is not a way around either.
 
