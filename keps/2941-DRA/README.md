@@ -1841,14 +1841,18 @@ against, so bumping that dependency means reviewing any new field that affects t
 | alternatives under count-based mappings (no `sources`) that all resolve to one logical resource | supported |
 | subrequest `capacity` under a source-less mapping | supported, charged by device count |
 | subrequest `selectors` and `tolerations` | selectors compiled; neither is part of the charge; no device cardinality check |
-| direct `ResourceClaim` reference | request rejected |
-| an alternative with allocation mode `All` | request rejected |
-| unknown allocation mode, or a malformed union | request rejected |
-| an alternative with an unmapped DeviceClass | request rejected |
-| an alternative whose mapping configures a `counter` or `capacity` source | request rejected |
-| alternatives resolving to more than one logical resource | request rejected |
-| a source-backed `Exactly` request in the same Workload, unless `adminAccess` | Workload rejected |
-| a non-DRA contribution on a resource an envelope is charged on | Workload rejected |
+| direct `ResourceClaim` reference | rejected |
+| an alternative with allocation mode `All` | rejected |
+| unknown allocation mode, or a malformed union | rejected |
+| an alternative with an unmapped DeviceClass | rejected |
+| an alternative whose mapping configures a `counter` or `capacity` source | rejected |
+| alternatives resolving to more than one logical resource | rejected |
+| a source-backed `Exactly` request in the same Workload, unless `adminAccess` | rejected |
+| a non-DRA contribution on a resource an envelope is charged on | rejected |
+
+Every row has the same outcome, an inadmissible Workload, recorded as
+[Clearing a rejection](#clearing-a-rejection) describes; the rows differ only in what the message
+names.
 
 Why each refusal exists:
 
@@ -2016,8 +2020,8 @@ are listed with the Alpha criteria.
 
 #### Relationship with Kubernetes ResourceQuota
 
-This is a Kueue-specific policy and does not change Kubernetes `ResourceQuota` (KEP-4816). For a
-`firstAvailable` request:
+This is a Kueue-specific policy and does not change Kubernetes `ResourceQuota` (KEP-4816). For
+`firstAvailable` requests:
 
 | | core `ResourceQuota` | Kueue |
 |---|---|---|
