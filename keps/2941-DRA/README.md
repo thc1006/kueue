@@ -1861,6 +1861,10 @@ Why each refusal exists:
   one, so a fallback would make admission strictly harder than no fallback. Beta must solve this
   before the limit is lifted. The limit is on the mapping rather than on the request shape: the
   same Workload becomes supported once the administrator maps those DeviceClasses to one resource.
+- **A source-backed `Exactly` request in the same Workload**: with the ResourceSlice API
+  unavailable, a counter or capacity source contributes zero today rather than failing closed, and
+  this gate stays clear of that shared defect rather than admitting a Workload whose other charges
+  may fall short. Beta lifts the limit once such a source fails closed.
 - **A non-DRA contribution on a charged resource** is refused rather than merged. An `Exactly`
   charge is not one, since it is charged against the same total, and neither is a DRA-backed
   extended resource, which is replaced before the merge reads it. Lifting this limit takes an
@@ -2012,8 +2016,8 @@ are listed with the Alpha criteria.
 
 #### Relationship with Kubernetes ResourceQuota
 
-This is a Kueue-specific policy and does not change Kubernetes `ResourceQuota` (KEP-4816). For the
-`ExactCount` alternatives this Alpha covers:
+This is a Kueue-specific policy and does not change Kubernetes `ResourceQuota` (KEP-4816). For a
+`firstAvailable` request:
 
 | | core `ResourceQuota` | Kueue |
 |---|---|---|
