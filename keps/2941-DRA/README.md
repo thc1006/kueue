@@ -79,7 +79,7 @@ tags, and then generate with `hack/update-toc.sh`.
     - [Alpha support matrix](#alpha-support-matrix)
     - [Clearing a rejection](#clearing-a-rejection)
     - [Exactness and composition](#exactness-and-composition)
-    - [Integration and recovery requirements](#integration-and-recovery-requirements)
+    - [Integration requirements](#integration-requirements)
     - [Feature gate, version skew and MultiKueue](#feature-gate-version-skew-and-multikueue)
     - [Relationship with Kubernetes ResourceQuota](#relationship-with-kubernetes-resourcequota)
     - [Limitations and tradeoffs](#limitations-and-tradeoffs)
@@ -112,6 +112,7 @@ tags, and then generate with `hack/update-toc.sh`.
 - [Implementation History](#implementation-history)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
+  - [Charging a prioritized list other than by its envelope](#charging-a-prioritized-list-other-than-by-its-envelope)
   - [Refusing a request whose mapped resource an excluded prefix covers](#refusing-a-request-whose-mapped-resource-an-excluded-prefix-covers)
   - [Webhook Rewriting Extended Resources to ResourceClaimTemplates](#webhook-rewriting-extended-resources-to-resourceclaimtemplates)
   - [ResourceClaim By Count](#resourceclaim-by-count)
@@ -1775,9 +1776,8 @@ quota. With the gate off, such requests stay rejected as they are today.
 The gate decides one thing: whether a `firstAvailable` request may enter accounting or is refused
 as unsupported. Toggling it changes nothing observable for a Workload with no `firstAvailable`
 request. The queue and status mechanisms that record a rejection and retire a stale queue entry
-are `KueueDRAIntegration` properties, stated as requirements in
-[Integration and recovery requirements](#integration-and-recovery-requirements) and designed with
-the parent path.
+are `KueueDRAIntegration` properties, listed as parent prerequisites with the
+[Alpha criteria](#kueuedraintegrationprioritizedlist-v020) and designed with the parent path.
 
 #### Accounting rule
 
@@ -1844,8 +1844,12 @@ over every alternative and dropping one stops it bounding the allocation kube-sc
 choose. Source-backed alternatives are excluded because the counter and consumable-capacity paths
 process only `Exactly` requests today; they can be added later by charging each alternative
 through its source path and taking the component-wise maximum. Confining a request to one logical
-resource is a configuration-dependent restriction rather than a request shape: the same Workload
-becomes supported once the administrator maps those DeviceClasses to one resource.
+resource is a restriction on the mapping rather than on the request shape, and the same Workload
+becomes supported once the administrator maps those DeviceClasses to one resource. The hazard it
+avoids is what the envelope does across resources: with alternatives on different logical
+resources it charges every dimension while kube-scheduler consumes one, so a fallback makes
+admission strictly harder than no fallback. That is the hazard, and Beta has to solve it before
+the limit is lifted.
 
 The last row limits the composition, not the request: rather than merging such a contribution
 through the shared accounting, Alpha refuses the Workload. An `Exactly` charge on a charged
@@ -1880,6 +1884,15 @@ Every event in the second column is already delivered by a watch the workload co
 except the template one, which needs an index from a Workload to the templates it references and a
 watch on their lifecycle.
 
+The shapes in the first row are refused at admission rather than by the Workload webhook, where
+the `Exactly` path refuses them today. The `DeviceRequest` forms live in the
+`ResourceClaimTemplate`, which the webhook does not read and which can be deleted and recreated
+under the same name after the Workload has passed it, so a webhook check would be neither complete
+nor final. A Workload is also created by the job reconciler rather than by the user, so a webhook
+denial surfaces as a create error the reconciler retries, while an inadmissible Workload carries
+the reason in a condition. Refusing these shapes earlier is a change to the parent path that both
+request kinds would take together, and it is left to Beta.
+
 #### Exactness and composition
 
 The envelopes of a claim are summed in `resources.Amount`, which holds an integer exactly at any
@@ -1900,8 +1913,11 @@ Preprocessing carries the set of logical resource names the envelopes reached al
 charge, and both survive the same requeue. The workload request builder reads the same effective
 resources the DRA pass read, before extended-resource replacement runs, refuses a Workload carrying
 a non-DRA contribution on any of those names anywhere in the Workload, and checks the merged value
-of what remains. Summing by resource name before flavors are assigned is stricter than the
-per-flavor accounting that follows, which is intended.
+of what remains. The `Exactly` path merges such a contribution today and keeps doing so; the
+refusal starts only when a `firstAvailable` request reaches the name. That asymmetry is
+deliberate: it keeps this gate clear of the shared accounting defects rather than making it their
+fix. Summing by resource name before flavors are assigned is stricter than the per-flavor
+accounting that follows, which is intended.
 
 `excludeResourcePrefixes` applies to the Pod's own requests, before transformations run; a logical
 resource that an explicit `deviceClassMappings` entry synthesizes stays chargeable, as on the
@@ -1917,19 +1933,7 @@ resource is filtered on the same terms as an `Exactly` charge or an ordinary req
 the request as a whole rather than one of its alternatives. An administrator who wants DRA quota
 enforced declares the mapped resource or keeps `BlockUndeclared`.
 
-#### Integration and recovery requirements
-
-Before enabling the Alpha gate, Kueue must preserve the computed DRA charge through queue
-insertion, backoff and requeue. A schedulable result must use one coherent set of observed
-accounting inputs.
-
-After Kueue observes an accounting-relevant input change, admission or preemption must not use the
-superseded result. Failed recomputation must not leave the previous charge actionable.
-Deterministic rejections must be re-evaluated when their causes change, as the table in
-[Clearing a rejection](#clearing-a-rejection) lists, and transient read failures must remain
-retryable. Observed means observed by Kueue: a change the API server has accepted and
-Kueue has not yet seen, and the interval between the charge and the generated `ResourceClaim`, stay
-open and are stated in [Limitations and tradeoffs](#limitations-and-tradeoffs).
+#### Integration requirements
 
 The quota path, the MultiKueue admission check and any admission-time feasibility path consume one
 static-support classifier, in two stages. The first reads the API shape alone, with no gate, no
@@ -1995,9 +1999,9 @@ Namespace `ResourceQuota` and `ClusterQueue` quota may both apply to one Workloa
   request to one logical resource, so this is one dimension, but a request whose first choice is
   four devices and whose fallback is one still reserves four. This is conservative rather than
   unsafe, and it affects admission, cohort borrowing, preemption, Admission Fair Sharing usage,
-  ordering and utilization. Shrinking a reservation to the realized alternative after allocation
-  is out of scope; it would need a mechanism observing the generated ResourceClaims and updating
-  admitted usage, cache, fair-sharing, borrowing and preemption state.
+  ordering and utilization. Charging less than the envelope, or shrinking the reservation after
+  allocation, is discussed under
+  [Alternatives](#charging-a-prioritized-list-other-than-by-its-envelope).
 - The quota bound is defined for a fixed `ResourceClaimTemplate` identity and quota-affecting
   `ResourceClaimSpec`, from the reservation until the generated `ResourceClaim` is created. Kueue
   does not bind a reservation to a template deleted and recreated under the same name in that
@@ -2005,9 +2009,6 @@ Namespace `ResourceQuota` and `ClusterQueue` quota may both apply to one Workloa
   ([#13842](https://github.com/kubernetes-sigs/kueue/issues/13842)). The gap is inherited from the
   `Exactly` path; the gate stays Alpha and off by default while it is open, and the binding is
   re-evaluated before Beta.
-- Kubernetes 1.37 adds `derivedAttributes` to `DeviceSubRequest`, which a build against 1.36
-  decodes without the field and cannot classify. Raising the dependency and classifying it is a
-  prerequisite for leaving Alpha.
 - Feasibility is not checked at admission on this path, so an unschedulable Workload can hold its
   reservation until `WaitForPodsReady`, when enabled, evicts it.
 
@@ -2058,17 +2059,10 @@ implementing this enhancement to ensure the enhancements have also solid foundat
 The `firstAvailable` envelope is computed on the path the `Exactly` charge already takes. The
 shared DRA defects on that path, and the regression that closes each, are tracked with the
 implementation in [#14130](https://github.com/kubernetes-sigs/kueue/pull/14130); the
-prioritized-list implementation does not ship while any property in
-[Integration and recovery requirements](#integration-and-recovery-requirements) is unmet, and
-each repaired path is regressed with a `firstAvailable` envelope on the resource, the shape with
-nothing in the Pod spec to fall back on. The direct dependencies are
-[#13930](https://github.com/kubernetes-sigs/kueue/issues/13930) (a backoff requeue keeps the
-preprocessed charge), [#14535](https://github.com/kubernetes-sigs/kueue/issues/14535) (a charge and
-the spec it came from move together),
-[#14035](https://github.com/kubernetes-sigs/kueue/issues/14035) (one queueing point owns the
-charge), [#13969](https://github.com/kubernetes-sigs/kueue/issues/13969) (a rejection can be
-recovered from) and [#14372](https://github.com/kubernetes-sigs/kueue/issues/14372) (the CEL
-compiler environment).
+prioritized-list implementation does not ship while any parent prerequisite listed with the
+[Alpha criteria](#kueuedraintegrationprioritizedlist-v020) is unmet, and each repaired path is
+regressed with a `firstAvailable` envelope on the resource, the shape with nothing in the Pod spec
+to fall back on.
 
 #### Unit Tests
 
@@ -2258,13 +2252,10 @@ admitted one.
 Parent prerequisites, provided by `KueueDRAIntegration` and not designed here:
 
 - an unchanged preprocessing result survives a backoff or a requeue
-  ([#13930](https://github.com/kubernetes-sigs/kueue/issues/13930))
 - a Workload revision that changes what is charged, once observed, invalidates the earlier result
-  ([#14535](https://github.com/kubernetes-sigs/kueue/issues/14535))
 - a recomputation that fails leaves no schedulable entry built from the superseded result, and one
-  queueing point owns the result ([#14035](https://github.com/kubernetes-sigs/kueue/issues/14035))
+  queueing point owns the result
 - a deterministic rejection is recoverable
-  ([#13969](https://github.com/kubernetes-sigs/kueue/issues/13969))
 
 #### Beta
 
@@ -2328,7 +2319,8 @@ Parent prerequisites, provided by `KueueDRAIntegration` and not designed here:
   whole
 - support a source-backed `Exactly` request in the same Workload, once an unavailable source fails
   closed rather than contributing zero
-- classify `derivedAttributes` on `DeviceSubRequest`, which needs the Kubernetes 1.37 API
+- re-evaluate refusing the static request shapes at the Workload webhook, together with the
+  `Exactly` path
 
 #### GA
 
@@ -2408,6 +2400,19 @@ Parent prerequisites, provided by `KueueDRAIntegration` and not designed here:
 **Limited Dynamic Reconfiguration**: Unlike some other Kueue features, DRA configuration cannot be changed dynamically and requires controller restart.
 
 ## Alternatives
+
+### Charging a prioritized list other than by its envelope
+
+Charging the first alternative was rejected: a request whose first choice is one device and whose
+fallback is two would reserve one and could be allocated two, which is the leak the maximum
+prevents. Deferring the charge until allocation, or shrinking the reservation to the realized
+alternative afterwards, was rejected for Alpha: quota is decided at admission, before any
+`ResourceClaim` exists, and shrinking afterwards needs a mechanism that observes the generated
+claims and updates admitted usage, cache, fair sharing, borrowing and preemption state. Charging
+`All` its worst case, `AllocationResultsMaxSize` devices as core `ResourceQuota` does, was rejected
+because Kueue's quota drives admission rather than capping a namespace: reserving 32 devices for a
+request that may take one would block admission and hold capacity nobody uses, and the `Exactly`
+path refuses `All` today.
 
 ### Refusing a request whose mapped resource an excluded prefix covers
 

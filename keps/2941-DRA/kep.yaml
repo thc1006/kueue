@@ -22,10 +22,7 @@ see-also:
 replaces:
   - "https://github.com/kubernetes-sigs/kueue/pull/3071"
 
-# KEP-2941 is an umbrella whose feature gates graduate independently, so this
-# stage and the milestones below describe the KEP as a whole rather than any one
-# gate. Each gate's own maturity is recorded in Graduation Criteria;
-# KueueDRAIntegrationPrioritizedList is Alpha in v0.20 while the KEP is at beta.
+# The target maturity stage in the current dev cycle for this KEP.
 stage: beta
 
 # The most recent milestone for which work toward delivery of this KEP has been
