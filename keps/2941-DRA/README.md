@@ -1870,7 +1870,9 @@ requeues on Workload updates alone waits for the wrong event:
 
 | Rejection | Cleared by |
 | --- | --- |
-| a request shape: a direct `ResourceClaim` reference, `All`, an unknown allocation mode, a malformed union | a request or template change; `ResourceClaimTemplate.spec` is immutable, so a template repair is a delete and a recreate |
+| a direct `ResourceClaim` reference | a PodSet template change |
+| `All` in an alternative, or an allocation mode this build does not know | a template change; `ResourceClaimTemplate.spec` is immutable, so a template repair is a delete and a recreate; an unknown mode also clears once Kueue is built against the API that defines it |
+| a malformed union | the apiserver rejects it at creation; Kueue fails closed if one arrives, and a template or PodSet change clears it |
 | the configuration around it: an unmapped DeviceClass, a `counter` or `capacity` source on an alternative's mapping, alternatives over more than one logical resource | a request or template change, or a manager restart with the changed mappings |
 | a container, init-container or Pod-level request on a charged resource, including a limit read as a missing request, or `spec.overhead` on the Pod template | a PodSet template update |
 | a `LimitRange` default on a charged resource | that `LimitRange` created, updated or deleted, or a template update that stops it applying |
@@ -1884,14 +1886,18 @@ Every event in the second column is already delivered by a watch the workload co
 except the template one, which needs an index from a Workload to the templates it references and a
 watch on their lifecycle.
 
-The shapes in the first row are refused at admission rather than by the Workload webhook, where
-the `Exactly` path refuses them today. The `DeviceRequest` forms live in the
-`ResourceClaimTemplate`, which the webhook does not read and which can be deleted and recreated
-under the same name after the Workload has passed it, so a webhook check would be neither complete
-nor final. A Workload is also created by the job reconciler rather than by the user, so a webhook
-denial surfaces as a create error the reconciler retries, while an inadmissible Workload carries
-the reason in a condition. Refusing these shapes earlier is a change to the parent path that both
-request kinds would take together, and it is left to Beta.
+The static shapes are refused where the `Exactly` path refuses them today, at admission, rather
+than by the Workload webhook. Two of them live in the template: `All` is valid upstream, and an
+unknown allocation mode is one a newer apiserver may accept while the API asks clients to refuse
+it. The webhook does not read the template, and a template can be deleted and recreated under
+the same name after the Workload has passed the webhook, so a check there would be neither
+complete nor final. A malformed union does not reach Kueue from a validated apiserver, and the
+classifier's refusal is a fail-closed default for an object that bypassed validation. A direct
+`ResourceClaim` reference is visible in the Workload, so the webhook could refuse it; the parent
+path parks such a Workload today, and refusing it earlier is a change both request kinds would
+take together, which Beta re-evaluates. A Workload is also created by the job reconciler rather
+than by the user, so a webhook denial surfaces as a create error the reconciler retries, while
+an inadmissible Workload carries the reason in a condition.
 
 #### Exactness and composition
 
@@ -1913,11 +1919,11 @@ Preprocessing carries the set of logical resource names the envelopes reached al
 charge, and both survive the same requeue. The workload request builder reads the same effective
 resources the DRA pass read, before extended-resource replacement runs, refuses a Workload carrying
 a non-DRA contribution on any of those names anywhere in the Workload, and checks the merged value
-of what remains. The `Exactly` path merges such a contribution today and keeps doing so; the
-refusal starts only when a `firstAvailable` request reaches the name. That asymmetry is
-deliberate: it keeps this gate clear of the shared accounting defects rather than making it their
-fix. Summing by resource name before flavors are assigned is stricter than the per-flavor
-accounting that follows, which is intended.
+of what remains. The `Exactly` path merges such a contribution today and keeps doing so until a
+`firstAvailable` request reaches the name, an asymmetry that is deliberate: it keeps this gate
+clear of the shared accounting defects rather than making it their fix. Summing by resource name
+before flavors are assigned is stricter than the per-flavor accounting that follows, which is
+intended.
 
 `excludeResourcePrefixes` applies to the Pod's own requests, before transformations run; a logical
 resource that an explicit `deviceClassMappings` entry synthesizes stays chargeable, as on the
@@ -2059,10 +2065,11 @@ implementing this enhancement to ensure the enhancements have also solid foundat
 The `firstAvailable` envelope is computed on the path the `Exactly` charge already takes. The
 shared DRA defects on that path, and the regression that closes each, are tracked with the
 implementation in [#14130](https://github.com/kubernetes-sigs/kueue/pull/14130); the
-prioritized-list implementation does not ship while any parent prerequisite listed with the
-[Alpha criteria](#kueuedraintegrationprioritizedlist-v020) is unmet, and each repaired path is
-regressed with a `firstAvailable` envelope on the resource, the shape with nothing in the Pod spec
-to fall back on.
+prioritized-list implementation does not ship while any of these properties is unmet, and each
+repaired path is regressed with a `firstAvailable` envelope on the resource, the shape with
+nothing in the Pod spec to fall back on. The direct dependencies are a backoff requeue keeping the
+preprocessed charge, a charge and the spec it came from moving together, one queueing point
+owning the charge, a rejection being recoverable, and the CEL compiler environment.
 
 #### Unit Tests
 
