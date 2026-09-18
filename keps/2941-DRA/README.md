@@ -1882,16 +1882,14 @@ watch on their lifecycle.
 
 #### Exactness and composition
 
-A charge is admissible only when every accounting and persistence representation in the tree can
-hold it exactly. The implementation must reject, rather than clamp or wrap, a charge that cannot
-be represented exactly at request aggregation, at the merge of an envelope with the `Exactly`
-charges on the same resource, at the PodSet-count multiplication, at the sum across PodSets, and at
-the `resource.Quantity` to `int64` conversion and persistence. Exactly means at milli scale for
-`cpu` and at scale zero otherwise, the unit convention of `resources.ResourceValue`, and it covers
-rounding as well as range, and it is checked on merged totals rather than on each operand.
-Representability is decided against `spec.podSets[].count`, the largest count the Workload can ask
-for, so validity does not move with partial admission or `ReclaimablePods`; the cost is
-utilization, not safety.
+The envelopes of a claim are summed in `resources.Amount`, which holds an integer exactly at any
+magnitude, and the sum reaches the shared request path through the same Amount-to-Quantity
+boundary every other resource crosses. From there a DRA charge is treated like any other request:
+the per-Workload request arithmetic saturates at `math.MaxInt64`, and a charge of that magnitude is
+admissible only against a quota of the same magnitude, since the scheduler compares amounts
+exactly. That saturation is shared behaviour
+([#14371](https://github.com/kubernetes-sigs/kueue/issues/14371)); this gate neither depends on it
+nor changes it.
 
 Each operand is checked non-negative where the merge happens. A negative request on a charged
 resource would subtract from the envelope, and `FloorToZero` afterwards would hide the cancellation
@@ -2164,11 +2162,9 @@ using mock ResourceClaimTemplates and DeviceClasses to simulate DRA workloads. K
   kind with the zero kinds failing closed, a source-backed `Exactly` request in the same Workload
   refused with `adminAccess` exempt, and each composition contribution refused and then cleared by
   the event its row names
-- Prioritized list exactness: a per-Pod sum, a PodSet multiplication and a sum across PodSets that
-  the representation cannot hold exactly each mark the Workload inadmissible rather than clamping,
-  with the boundary read off the representation rather than written as a constant; a charge that
-  overflows at `spec.podSets[].count` and would fit after a reclaim is refused; scaling a PodSet
-  down stays exact
+- Prioritized list exactness: a sum of envelopes past the `int64` range is kept exactly in
+  `resources.Amount` rather than saturated, and reaches the request path through the shared
+  Amount-to-Quantity boundary
 - Prioritized list lifecycle: a backoff requeue and an inflight requeue admit on the charge the
   current revision produces; a stale entry whose inputs changed (the request, a template deleted
   and recreated under the same name, the mapping, the gate) issues no admission, preemption or
@@ -2250,8 +2246,8 @@ admitted one.
   table-driven tests freezing each union form
 - preprocessing carrying the logical-resource names the envelopes reached, read as their union
   across the Workload, through queue and requeue together with the charge
-- a charge that any boundary cannot represent exactly making the Workload inadmissible rather
-  than saturated, and a negative operand refused at the merge
+- envelopes summed in `resources.Amount`, exact at any magnitude, and a negative operand refused
+  at the merge
 - each rejection class re-evaluated by the event that clears it, and read failures retried rather
   than recorded
 - `excludeResourcePrefixes` and `IgnoreUndeclared` applied to an envelope-touched resource on the
